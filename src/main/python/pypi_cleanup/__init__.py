@@ -18,6 +18,7 @@ import argparse
 import configparser
 import datetime
 import getpass
+import json
 import logging
 import os
 import re
@@ -35,6 +36,61 @@ from requests.exceptions import RequestException
 from pypi_cleanup.__version__ import __version__
 
 DEFAULT_PATTERNS = [re.compile(r".*\.dev\d+$")]
+
+
+def parse_before_date(value):
+    try:
+        parsed = datetime.date.fromisoformat(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError("expected an ISO date in YYYY-MM-DD format") from e
+
+    return datetime.datetime.combine(parsed, datetime.time.min, tzinfo=datetime.timezone.utc)
+
+
+def normalize_package_name(value):
+    return re.sub(r"[-_.]+", "-", value).lower()
+
+
+def load_preserve_file(path, packages):
+    if len(packages) != 1:
+        raise ValueError("--preserve-file requires exactly one --package")
+
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except OSError as e:
+        raise ValueError(f"could not read preserve file {path!r}: {e}") from e
+    except json.JSONDecodeError as e:
+        raise ValueError(f"preserve file {path!r} is not valid JSON: {e}") from e
+
+    if not isinstance(data, dict):
+        raise ValueError("preserve file must contain a JSON object")
+
+    package = data.get("package")
+    if not isinstance(package, str) or not package or package != package.strip():
+        raise ValueError("preserve file 'package' must be a non-empty string without surrounding whitespace")
+    if normalize_package_name(package) != normalize_package_name(packages[0]):
+        raise ValueError(
+            f"preserve file is for package {package!r}, not requested package {packages[0]!r}"
+        )
+
+    versions = data.get("preserve_versions")
+    if not isinstance(versions, list):
+        raise ValueError("preserve file 'preserve_versions' must be a JSON array")
+
+    invalid_versions = [
+        version
+        for version in versions
+        if not isinstance(version, str) or not version or version != version.strip()
+    ]
+    if invalid_versions:
+        raise ValueError(
+            "preserve file versions must be non-empty strings without surrounding whitespace"
+        )
+    if len(versions) != len(set(versions)):
+        raise ValueError("preserve file contains duplicate versions")
+
+    return frozenset(versions)
 
 
 class PageTitleParser(HTMLParser):
@@ -111,7 +167,8 @@ CsfrParser = CsrfParser
 
 class PypiCleanup:
     def __init__(self, url, username, packages, do_it, patterns, verbose, days, query_only, leave_most_recent_only,
-                 confirm, delete_project, debug_auth=False, **_):
+                 confirm, delete_project, debug_auth=False, before=None, preserve_file=None,
+                 preserve_versions=None, **_):
         self.url = urlparse(url).geturl()
         if self.url[-1] == "/":
             self.url = self.url[:-1]
@@ -125,7 +182,9 @@ class PypiCleanup:
         self.query_only = query_only
         self.leave_most_recent_only = leave_most_recent_only
         self.debug_auth = debug_auth
-        self.date = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
+        self.preserve_file = preserve_file
+        self.preserve_versions = preserve_versions or frozenset()
+        self.date = before or datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
 
     def _relative_url(self, url):
         if url.startswith(self.url):
@@ -318,14 +377,38 @@ class PypiCleanup:
                     logging.info(
                         f"Leaving the MOST RECENT version for {package!r}: {leave_release} - "
                         f"{releases_by_date[leave_release].strftime('%Y-%m-%dT%H:%M:%S.%f%z')}")
-                    pkg_vers = list(r for r in releases_by_date if r != leave_release)
+                    selected_pkg_vers = [release for release in releases_by_date if release != leave_release]
                 else:
-                    pkg_vers = list(filter(lambda k:
-                                           any(filter(lambda rex: rex.match(k),
-                                                      self.patterns)) and releases_by_date[k] < self.date,
-                                           releases_by_date.keys()))
+                    selected_pkg_vers = [
+                        release
+                        for release, release_date in releases_by_date.items()
+                        if any(pattern.match(release) for pattern in self.patterns) and release_date < self.date
+                    ]
 
-                if not pkg_vers:
+                preserved_pkg_vers = [version for version in selected_pkg_vers
+                                      if version in self.preserve_versions]
+                pkg_vers = [version for version in selected_pkg_vers
+                            if version not in self.preserve_versions]
+
+                if self.preserve_file:
+                    logging.info(f"Releases selected before applying preserve file for package {package!r}:")
+                    for pkg_ver in selected_pkg_vers:
+                        logging.info(f" {pkg_ver}")
+                    if not selected_pkg_vers:
+                        logging.info(" (none)")
+
+                    logging.info(f"Releases excluded by preserve file {self.preserve_file!r}:")
+                    for pkg_ver in preserved_pkg_vers:
+                        logging.info(f" {pkg_ver}")
+                    if not preserved_pkg_vers:
+                        logging.info(" (none)")
+
+                    logging.info(f"Final releases of package {package!r} to delete:")
+                    for pkg_ver in pkg_vers:
+                        logging.info(f" {pkg_ver}")
+                    if not pkg_vers:
+                        logging.info(" (none)")
+                elif not pkg_vers:
                     logging.info(f"No releases were found matching specified patterns "
                                  f"and dates in package {package!r}")
                 else:
@@ -474,6 +557,15 @@ def main():
         g.add_argument("--leave-most-recent-only", action="store_true", default=False,
                        help="delete all releases except the *most recent* one, i.e. the one containing "
                             "the most recently created files")
+        date_group = parser.add_mutually_exclusive_group()
+        date_group.add_argument("-d", "--days", type=int, default=0,
+                                help="only delete releases **matching specified patterns** where all files are "
+                                     "older than X days")
+        date_group.add_argument("--before", type=parse_before_date,
+                                help="only delete releases where all files were uploaded before YYYY-MM-DD "
+                                     "at 00:00:00 UTC")
+        parser.add_argument("--preserve-file",
+                            help="JSON file naming one package and release versions that must not be deleted")
         parser.add_argument("--query-only", action="store_true", default=False,
                             help="only queries and processes the package, no login required")
         parser.add_argument("--do-it", action="store_true", default=False,
@@ -482,14 +574,19 @@ def main():
                             help="actually perform the destructive delete that will remove all versions of the project")
         parser.add_argument("-y", "--yes", action="store_true", default=False, dest="confirm",
                             help="confirm extremely dangerous destructive delete")
-        parser.add_argument("-d", "--days", type=int, default=0,
-                            help="only delete releases **matching specified patterns** where all files are "
-                                 "older than X days")
         parser.add_argument("-v", "--verbose", action="store_const", const=1, default=0, help="be verbose")
         parser.add_argument("--debug-auth", action="store_true", default=False,
                             help="log PyPI authentication redirects, page titles, markers, and sanitized snapshots")
 
         args = parser.parse_args()
+        if args.preserve_file:
+            try:
+                args.preserve_versions = load_preserve_file(args.preserve_file, args.packages)
+            except ValueError as e:
+                parser.error(str(e))
+        else:
+            args.preserve_versions = frozenset()
+
         if args.patterns and not args.confirm and not args.do_it and not args.query_only:
             logging.warning(dedent(f"""
             WARNING:

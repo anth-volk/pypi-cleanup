@@ -50,7 +50,7 @@ redacted.
 
 ```bash
 $ pypi-cleanup --help
-usage: pypi-cleanup [-h] [-u USERNAME] -p PACKAGES [-t URL] [-r PATTERNS | --leave-most-recent-only] [--query-only] [--do-it] [--delete-project] [-y] [-d DAYS] [-v] [--debug-auth]
+usage: pypi-cleanup [-h] [-u USERNAME] -p PACKAGES [-t URL] [-r PATTERNS | --leave-most-recent-only] [-d DAYS | --before BEFORE] [--preserve-file PRESERVE_FILE] [--query-only] [--do-it] [--delete-project] [-y] [-v] [--debug-auth]
 
 PyPi Package Cleanup Utility v0.1.8
 
@@ -65,11 +65,14 @@ options:
                         regex to use to match package versions to be deleted (default: None)
   --leave-most-recent-only
                         delete all releases except the *most recent* one, i.e. the one containing the most recently created files (default: False)
+  -d DAYS, --days DAYS  only delete releases **matching specified patterns** where all files are older than X days (default: 0)
+  --before BEFORE       only delete releases where all files were uploaded before YYYY-MM-DD at 00:00:00 UTC (default: None)
+  --preserve-file PRESERVE_FILE
+                        JSON file naming one package and release versions that must not be deleted (default: None)
   --query-only          only queries and processes the package, no login required (default: False)
   --do-it               actually perform the destructive delete (default: False)
   --delete-project      actually perform the destructive delete that will remove all versions of the project (default: False)
   -y, --yes             confirm extremely dangerous destructive delete (default: False)
-  -d DAYS, --days DAYS  only delete releases **matching specified patterns** where all files are older than X days (default: 0)
   -v, --verbose         be verbose (default: 0)
   --debug-auth          log PyPI authentication redirects, page titles, markers, and sanitized snapshots (default: False)
 ```
@@ -100,6 +103,37 @@ INFO:root: 19.1.0.0rc4.post13
 INFO:root: 19.1.0.0rc4.post18
 INFO:root:Query-only mode - exiting
 ```
+
+#### Absolute Cutoff With Preserved Releases
+
+Use `--before` when cleanup must use a fixed UTC date instead of an age relative to the current time. The date is
+exclusive: `--before 2026-07-01` selects releases only when every file was uploaded before
+`2026-07-01T00:00:00Z`. `--before` and `--days` cannot be used together.
+
+A preserve file is a package-specific JSON object:
+
+```json
+{
+  "package": "example-package",
+  "preserve_versions": ["1.2.3", "2.0.0"]
+}
+```
+
+The package name must match the single `--package` argument. Version entries must be unique, non-empty strings.
+The preserve exclusions are applied after the regular expression and date filters. Preview the exact selection
+without authenticating:
+
+```bash
+$ pypi-cleanup \
+    --package example-package \
+    --version-regex '.*' \
+    --before 2026-07-01 \
+    --preserve-file ./example-package-preserve.json \
+    --query-only
+```
+
+When a preserve file is supplied, the output lists the releases selected before exclusions, the releases excluded
+by the preserve file, and the final releases to delete.
 
 #### Regular Cleanup of Development Artifacts
 

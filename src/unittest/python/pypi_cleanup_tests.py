@@ -14,9 +14,16 @@
 #   limitations under the License.
 #
 
+import argparse
+import datetime
+import json
+import re
+import tempfile
 import unittest
-from unittest.mock import Mock, patch, MagicMock
-from pypi_cleanup import PypiCleanup
+from pathlib import Path
+from unittest.mock import MagicMock, Mock, patch
+
+from pypi_cleanup import PypiCleanup, load_preserve_file, parse_before_date
 
 
 class ContextResponse:
@@ -124,6 +131,112 @@ class TestEmptyMatchesListRegression(unittest.TestCase):
             if "max() arg is an empty sequence" in str(e):
                 self.fail("max() was called on empty list - bug not fixed!")
             raise
+
+
+class TestBeforeAndPreserveOptions(unittest.TestCase):
+    def write_preserve_file(self, directory, data):
+        path = Path(directory) / "preserve.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        return path
+
+    def test_before_date_is_utc_midnight(self):
+        self.assertEqual(
+            parse_before_date("2026-07-01"),
+            datetime.datetime(2026, 7, 1, tzinfo=datetime.timezone.utc),
+        )
+
+    def test_before_date_rejects_non_iso_date(self):
+        with self.assertRaises(argparse.ArgumentTypeError):
+            parse_before_date("July 1, 2026")
+
+    def test_preserve_file_loads_versions_for_normalized_package_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_preserve_file(
+                directory,
+                {"package": "test_package", "preserve_versions": ["1.0.0", "2.0.0"]},
+            )
+
+            self.assertEqual(
+                load_preserve_file(path, ["test-package"]),
+                frozenset(("1.0.0", "2.0.0")),
+            )
+
+    def test_preserve_file_rejects_wrong_package(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_preserve_file(
+                directory,
+                {"package": "other-package", "preserve_versions": ["1.0.0"]},
+            )
+
+            with self.assertRaisesRegex(ValueError, "not requested package"):
+                load_preserve_file(path, ["test-package"])
+
+    def test_preserve_file_rejects_invalid_versions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_preserve_file(
+                directory,
+                {"package": "test-package", "preserve_versions": ["1.0.0", " 2.0.0"]},
+            )
+
+            with self.assertRaisesRegex(ValueError, "non-empty strings"):
+                load_preserve_file(path, ["test-package"])
+
+    @patch("pypi_cleanup.requests.Session")
+    def test_preserved_release_is_excluded_after_before_date_selection(self, mock_session):
+        mock_session_instance = MagicMock()
+        mock_session.return_value.__enter__.return_value = mock_session_instance
+
+        mock_response = Mock()
+        mock_response.json.return_value = {
+            "name": "test-package",
+            "versions": ["1.0.0", "1.0.1", "1.0.2"],
+            "files": [
+                {
+                    "filename": "test_package-1.0.0.tar.gz",
+                    "upload-time": "2026-06-30T23:58:00.000000+00:00",
+                },
+                {
+                    "filename": "test_package-1.0.1.tar.gz",
+                    "upload-time": "2026-06-30T23:59:00.000000+00:00",
+                },
+                {
+                    "filename": "test_package-1.0.2.tar.gz",
+                    "upload-time": "2026-07-01T00:00:00.000000+00:00",
+                },
+            ],
+        }
+        mock_response.raise_for_status = Mock()
+        mock_session_instance.get.return_value.__enter__.return_value = mock_response
+
+        cleanup = PypiCleanup(
+            url="https://pypi.org",
+            username=None,
+            packages=["test-package"],
+            do_it=False,
+            patterns=[re.compile(".*")],
+            verbose=False,
+            days=0,
+            before=parse_before_date("2026-07-01"),
+            preserve_file="preserve.json",
+            preserve_versions=frozenset(("1.0.0",)),
+            query_only=True,
+            leave_most_recent_only=False,
+            confirm=False,
+            delete_project=False,
+        )
+
+        with self.assertLogs(level="INFO") as logs:
+            self.assertIsNone(cleanup.run())
+
+        output = "\n".join(logs.output)
+        self.assertIn("Releases selected before applying preserve file", output)
+        self.assertIn("Releases excluded by preserve file", output)
+        self.assertIn("Final releases of package 'test-package' to delete", output)
+        self.assertIn(" 1.0.0", output)
+        final_releases = output.split("Final releases of package 'test-package' to delete:", 1)[1]
+        self.assertIn(" 1.0.1", final_releases)
+        self.assertNotIn(" 1.0.0", final_releases)
+        self.assertNotIn(" 1.0.2", output)
 
 
 class TestCsrfParsing(unittest.TestCase):
