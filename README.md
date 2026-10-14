@@ -3,6 +3,7 @@
 [![PyPI Cleanup Version](https://img.shields.io/pypi/v/pypi-cleanup?logo=pypi)](https://pypi.org/project/pypi-cleanup/)
 [![PyPI Cleanup Python Versions](https://img.shields.io/pypi/pyversions/pypi-cleanup?logo=pypi)](https://pypi.org/project/pypi-cleanup/)
 [![Build Status](https://img.shields.io/github/actions/workflow/status/arcivanov/pypi-cleanup/pypi-cleanup.yml?branch=master)](https://github.com/arcivanov/pypi-cleanup/actions/workflows/pypi-cleanup.yml)
+[![Coverage Status](https://img.shields.io/coveralls/github/arcivanov/pypi-cleanup/master?logo=coveralls)](https://coveralls.io/r/arcivanov/pypi-cleanup?branch=master)
 [![PyPI Cleanup Downloads Per Day](https://img.shields.io/pypi/dd/pypi-cleanup?logo=pypi)](https://pypi.org/project/pypi-cleanup/)
 [![PyPI Cleanup Downloads Per Week](https://img.shields.io/pypi/dw/pypi-cleanup?logo=pypi)](https://pypi.org/project/pypi-cleanup/)
 [![PyPI Cleanup Downloads Per Month](https://img.shields.io/pypi/dm/pypi-cleanup?logo=pypi)](https://pypi.org/project/pypi-cleanup/)
@@ -50,7 +51,7 @@ redacted.
 
 ```bash
 $ pypi-cleanup --help
-usage: pypi-cleanup [-h] [-u USERNAME] -p PACKAGES [-t URL] [-r PATTERNS | --leave-most-recent-only] [-d DAYS | --before BEFORE] [--preserve-file PRESERVE_FILE] [--query-only] [--do-it] [--delete-project] [-y] [-v] [--debug-auth]
+usage: pypi-cleanup [-h] [-u USERNAME] -p PACKAGES [-t URL] [-r PATTERNS | --leave-most-recent-only] [-d DAYS | --before BEFORE] [--preserve-file PRESERVE_FILE] [--query-only] [--do-it] [--delete-project] [-y] [-v] [--debug] [--debug-auth]
 
 PyPi Package Cleanup Utility v0.1.8
 
@@ -74,6 +75,7 @@ options:
   --delete-project      actually perform the destructive delete that will remove all versions of the project (default: False)
   -y, --yes             confirm extremely dangerous destructive delete (default: False)
   -v, --verbose         be verbose (default: 0)
+  --debug               enable debugging (default: 0)
   --debug-auth          log PyPI authentication redirects, page titles, markers, and sanitized snapshots (default: False)
 ```
 

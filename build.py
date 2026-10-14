@@ -21,6 +21,7 @@ use_plugin("python.unittest")
 use_plugin("python.integrationtest")
 use_plugin("python.flake8")
 use_plugin("python.coverage")
+use_plugin("python.coveralls")
 use_plugin("python.distutils")
 use_plugin("python.pycharm")
 use_plugin("copy_resources")
@@ -28,7 +29,7 @@ use_plugin("filter_resources")
 
 
 name = "pypi-cleanup"
-version = "0.1.11.dev"
+version = "0.1.13.dev"
 summary = "PyPI Bulk Release Version Cleanup Utility"
 
 authors = [Author("Arcadiy Ivanov", "arcadiy@ivanov.biz")]
@@ -41,7 +42,7 @@ urls = {"Bug Tracker": "https://github.com/arcivanov/pypi-cleanup/issues",
         "Documentation": "https://github.com/arcivanov/pypi-cleanup"
         }
 
-requires_python = ">=3.9"
+requires_python = ">=3.11"
 
 default_task = ["analyze", "publish"]
 
@@ -74,12 +75,11 @@ def set_properties(project):
         "Programming Language :: Python :: Implementation :: CPython",
         "Programming Language :: Python :: Implementation :: PyPy",
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.9",
-        "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
         "Programming Language :: Python :: 3.13",
         "Programming Language :: Python :: 3.14",
+        "Programming Language :: Python :: 3.15",
         "Operating System :: MacOS :: MacOS X",
         "Operating System :: POSIX :: Linux",
         "Operating System :: Microsoft :: Windows",

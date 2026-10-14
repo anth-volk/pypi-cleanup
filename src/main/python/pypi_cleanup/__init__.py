@@ -117,7 +117,7 @@ class PageTitleParser(HTMLParser):
 
 
 class CsrfParser(HTMLParser):
-    def __init__(self, target, contains_input=None):
+    def __init__(self, target, contains_input=None, debug=False):
         super().__init__()
         self._target = target
         self._contains_input = contains_input
@@ -125,13 +125,23 @@ class CsrfParser(HTMLParser):
         self._csrf = None  # Temp value from current form
         self._in_form = False  # Currently parsing a form with an action we're interested in
         self._input_contained = False  # Input field requested is contained in the current form
+        self.checkboxes = {}  # Result checkboxes (name -> submitted value) of the form the csrf came from
+        self._checkboxes = {}  # Temp value from current form
+        self._debug = debug
+
+    def feed(self, data):
+        if self._debug:
+            logging.debug(f"Feeding data: {data!r}")
+        super().feed(data)
 
     def handle_starttag(self, tag, attrs):
         if tag == "form":
             attrs = dict(attrs)
             action = attrs.get("action")  # Might be None.
+            # Several forms may share the same action, e.g. all modals on the release page
             self._csrf = None
             self._input_contained = False
+            self._checkboxes = {}
             if action and self._form_action_matches(action):
                 self._in_form = True
             return
@@ -143,6 +153,10 @@ class CsrfParser(HTMLParser):
 
             if self._contains_input and attrs.get("name") == self._contains_input:
                 self._input_contained = True
+
+            # Confirmations (e.g. delete acknowledgments) that the server requires to be checked
+            if attrs.get("type") == "checkbox" and attrs.get("name"):
+                self._checkboxes[attrs["name"]] = attrs.get("value", "on")
 
             return
 
@@ -159,15 +173,45 @@ class CsrfParser(HTMLParser):
             # If we're in a right form that contains the requested input and csrf is not set
             if (not self._contains_input or self._input_contained) and not self.csrf:
                 self.csrf = self._csrf
+                self.checkboxes = self._checkboxes
             return
 
 
 CsfrParser = CsrfParser
 
 
+class FlashMessageParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.messages = []
+        self._tag = None  # Tag of the message element currently being parsed
+        self._depth = 0  # Nesting depth of self._tag inside the message element, 0 if not in a message
+
+    def handle_starttag(self, tag, attrs):
+        if self._depth:
+            if tag == self._tag:
+                self._depth += 1
+        elif "notification-bar__message" in (dict(attrs).get("class") or "").split():
+            self._tag = tag
+            self._depth = 1
+            self.messages.append("")
+
+    def handle_endtag(self, tag):
+        if self._depth and tag == self._tag:
+            self._depth -= 1
+
+    def handle_data(self, data):
+        if self._depth:
+            self.messages[-1] += data
+
+    def close(self):
+        super().close()
+        self.messages = [" ".join(m.split()) for m in self.messages]
+
+
 class PypiCleanup:
     def __init__(self, url, username, packages, do_it, patterns, verbose, days, query_only, leave_most_recent_only,
-                 confirm, delete_project, debug_auth=False, before=None, preserve_file=None,
+                 confirm, delete_project, debug=False, debug_auth=False, before=None, preserve_file=None,
                  preserve_versions=None, **_):
         self.url = urlparse(url).geturl()
         if self.url[-1] == "/":
@@ -176,6 +220,7 @@ class PypiCleanup:
         self.do_it = do_it
         self.confirm = confirm
         self.delete_project = delete_project
+        self.debug = debug
         self.packages = packages
         self.patterns = patterns or DEFAULT_PATTERNS
         self.verbose = verbose
@@ -272,12 +317,15 @@ class PypiCleanup:
 
         return message
 
-    def _csrf_from_response(self, response, form_action, contains_input=None):
-        parser = CsrfParser(form_action, contains_input)
+    def _form_from_response(self, response, form_action, contains_input=None):
+        parser = CsrfParser(form_action, contains_input, debug=self.debug)
         parser.feed(response.text)
         if not parser.csrf:
             raise ValueError(self._missing_csrf_message(response, form_action, contains_input))
-        return parser.csrf
+        return parser
+
+    def _csrf_from_response(self, response, form_action, contains_input=None):
+        return self._form_from_response(response, form_action, contains_input).csrf
 
     def _complete_email_login_confirmation(self, session):
         logging.warning("PyPI requires email confirmation for this login.")
@@ -525,15 +573,32 @@ class PypiCleanup:
                         form_url = f"{self.url}{form_action}"
                         with s.get(form_url) as r:
                             r.raise_for_status()
-                            csrf = self._csrf_from_response(r, form_action, "confirm_delete_version")
+                            delete_form = self._form_from_response(r, form_action, "confirm_delete_version")
+                            csrf = delete_form.csrf
+                            acknowledgments = delete_form.checkboxes
                             referer = r.url
 
                         with s.post(form_url,
                                     data={"csrf_token": csrf,
+                                          **acknowledgments,
                                           "confirm_delete_version": pkg_ver,
                                           },
                                     headers={"referer": referer}) as r:
                             r.raise_for_status()
+                            # On success PyPI redirects to the project releases page,
+                            # otherwise it flashes an error and redirects back to the release page
+                            deleted = re.fullmatch(r"/manage/project/[^/]+/releases/", urlparse(r.url).path)
+                            failed_url = r.url
+
+                        if not deleted:
+                            with s.get(f"{self.url}/_includes/unauthed/flash-messages/") as r:
+                                r.raise_for_status()
+                                parser = FlashMessageParser()
+                                parser.feed(r.text)
+                                parser.close()
+                            reason = "; ".join(parser.messages) or f"redirected to {failed_url}"
+                            logging.error(f"Failed to delete {package!r} version {pkg_ver}: {reason}")
+                            return 1
 
                         logging.info(f"Deleted {package!r} version {pkg_ver}")
                     else:
@@ -541,8 +606,6 @@ class PypiCleanup:
 
 
 def main():
-    logging.basicConfig(level=logging.INFO)
-
     try:
         parser = argparse.ArgumentParser(description=f"PyPi Package Cleanup Utility v{__version__}",
                                          formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -575,10 +638,14 @@ def main():
         parser.add_argument("-y", "--yes", action="store_true", default=False, dest="confirm",
                             help="confirm extremely dangerous destructive delete")
         parser.add_argument("-v", "--verbose", action="store_const", const=1, default=0, help="be verbose")
+        parser.add_argument("--debug", action="store_const", const=1, default=0, help="enable debugging")
         parser.add_argument("--debug-auth", action="store_true", default=False,
                             help="log PyPI authentication redirects, page titles, markers, and sanitized snapshots")
 
         args = parser.parse_args()
+
+        logging.basicConfig(level=logging.INFO if not args.debug else logging.DEBUG)
+
         if args.preserve_file:
             try:
                 args.preserve_versions = load_preserve_file(args.preserve_file, args.packages)
